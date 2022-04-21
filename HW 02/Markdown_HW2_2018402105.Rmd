@@ -1,0 +1,444 @@
+---
+title: "IE425 - Spring 2022, Homework 2"
+author: "Ahmet Yiğit Doğan - 2018402105"
+date: "16 April, 2022"
+output:
+  html_document:
+    toc: yes
+    toc_depth: '2'
+    df_print: paged
+  html_notebook:
+    toc: yes
+    toc_depth: 2
+    number_sections: no
+    toc_float: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(  message     = FALSE,
+	                    warning     = FALSE,
+                        fig.align   = "center")
+```
+
+```{r toolbox-and-working-directory-setups}
+# Library imports
+
+library(data.table)
+library(dplyr)
+library(rpart)
+library(caret)
+library(randomForest)
+library(gbm)
+library(caTools)
+library(Metrics)
+library(ggcorrplot)
+
+# Setting the working directory
+
+setwd(getwd())
+
+# Fixing the seed to 425
+
+seed <- 425
+
+```
+
+# Question 1
+
+Consider the “Human Resources Analytics” problem which is based on the data set
+“HR.csv”. Why are our best and most experienced employees leaving prematurely? Have fun
+with this database and try to predict which valuable employees will leave next. Fields in the
+data set include:
+
+- Satisfaction Level
+- Last evaluation
+- Number of projects
+- Average monthly hours
+- Time spent at the company
+- Whether they have had a work accident
+- Whether they have had a promotion in the last 5 years
+- Departments (the column "sales")
+- Salary
+- Whether the employee has left
+
+Our goal is to predict the profile of employees who are likely to quit.
+
+```{r q1}
+# Importing, modifying, and checking the data
+
+hr                          <-  fread("HR.csv")
+
+hr$Work_accident            <-  as.factor(hr$Work_accident)
+hr$left                     <-  as.factor(hr$left)
+hr$promotion_last_5years    <-  as.factor(hr$promotion_last_5years)
+hr$sales                    <-  as.factor(hr$sales)
+hr$salary                   <-  as.factor(hr$salary)
+
+str(hr)
+
+```
+
+## Part A
+
+Partition the data set into training and test sets with 80% going into the training set by using
+a seed value of 425. Whenever you need to use the "set.seed" function, use set.seed(425).
+
+```{r q1a}
+# Partitioning into training and test sets
+
+set.seed(seed)
+
+split1  <- sample.split(hr$left,
+                        SplitRatio = 0.80)
+
+hrtrain <- subset(hr, split1 == TRUE)
+hrtest  <- subset(hr, split1 == FALSE)
+
+```
+
+## Part B
+
+Determine the best random forest (based on the random forest package) by using 10-fold
+cross validation five times with the caret package on the training set by playing with the "mtry"
+and "ntree" parameters. What are the best values of these two parameters and what is the out-of-bag accuracy? Comment on which input attributes are important in making predictions.
+
+```{r q1b1}
+# Creating an empty data frame for the reporting after the trials
+
+report1b            <- data.frame(matrix(ncol = 3, nrow = 0))
+
+# Creating the tune grid with different mtry values:
+# from the square root of total predictors to the total number of predictors
+
+hr.rf.tuneGrid      <- expand.grid(mtry = (sqrt(ncol(hrtrain)-1) : (ncol(hrtrain)-1)))
+
+# Generating trials for different number of trees
+
+for(ntree in seq(from = 200, to = 800, by = 100)){
+    
+    set.seed(seed)
+    
+    try             <- train(left~.,
+                             data       = hrtrain,
+                             method     = "rf",
+                             trControl  = trainControl(method   = 'repeatedcv',
+                                                        number  = 10,
+                                                        repeats = 5),
+                             ntree      = ntree,
+                             tuneGrid   = hr.rf.tuneGrid)
+    
+    temp            <- data.frame(ntree,
+                                  try[["bestTune"]][["mtry"]],
+                                  max(try[["results"]][["Accuracy"]]))
+    
+    report1b        <- rbind(report1b, temp)
+    
+}
+
+# Displaying the report
+
+colnames(report1b)  <- c("ntree", "Best mtry", "Accuracy")
+
+report1b
+
+```
+
+As the above table suggests, the best values for *"mtry"* and *"ntree"* are *`r report1b[which.max(report1b$Accuracy), "Best mtry"]`* and *`r report1b[which.max(report1b$Accuracy), "ntree"]`*, respectively, which yield an accuracy of *`r report1b[which.max(report1b$Accuracy), "Accuracy"]`*.
+
+Note that accuracy is fixed to its maximum value from a certain point on, implying that simply the higher values "ntree" takes the better the model gets in most cases since there is no risk of overfitting in the random forest algorithm.
+
+```{r q1b2}
+# Generating the best model
+
+set.seed(seed)
+
+hr.rf.best      <- train(left~.,
+                         data       = hrtrain,
+                         method     = "rf",
+                         trControl  = trainControl(method   = 'repeatedcv',
+                                                   number   = 10,
+                                                   repeats  = 5),
+                         # Choosing the best ntree value in terms of accuracy
+                         ntree      = report1b[which.max(report1b$accuracy), "ntree"],
+                         tuneGrid   = hr.rf.tuneGrid)
+
+# Checking the best model, and its out-of-bag accuracy
+
+hr.rf.best[["finalModel"]]
+
+```
+
+```{r q1b3}
+# Checking the importance of the predictors
+
+hr.rf.var.imp <- varImp(hr.rf.best)
+plot(hr.rf.var.imp)
+
+```
+
+As the above plot suggests, 5 of the predictors have significantly high effect on the decisions of the employees:
+
+- Satisfaction level
+- Time spent in the company
+- Number of projects
+- Average monthly hours
+- Last evaluation
+
+Satisfaction level appears as a major decision criteria, which has an approximately double importance level of the second most important criteria, time spent in the company.
+
+## Part C
+
+Provide the Confusion Matrix along with sensitivity, specificity, precision and recall on the
+test set obtained by the best random forest.
+
+```{r q1c}
+# Checking the confusion matrix associated with the best model
+
+pred.hr.rf <- predict(hr.rf.best,
+                      newdata = hrtest)
+
+confusionMatrix(pred.hr.rf,
+                hrtest$left,
+                mode        = "everything",
+                positive    = "1")
+
+```
+
+## Part D
+
+Repeat part b with the gradient boosting using the "caret" and "gbm" packages by playing with
+the "interaction.depth", "n.trees", "shrinkage", and "n.minobsinnode" parameters. What are the best
+values of these four parameters?
+
+```{r q1d}
+hr.gbm.tuneGrid <- expand.grid(interaction.depth    = c(1, 2, 3),
+                               n.trees              = c(200, 300, 400),
+                               shrinkage            = (1:10)*0.1,
+                               n.minobsinnode       = c(10, 15))
+
+set.seed(seed)
+
+hr.gbm <- train(left~.,
+                data        = hrtrain,
+                method      = "gbm",
+                verbose     = FALSE,
+                trControl   = trainControl(method   = 'repeatedcv',
+                                           number   = 10,
+                                           repeats  = 5),
+                tuneGrid    = hr.gbm.tuneGrid)
+
+```
+
+Since the training set is large in this model, the shrinkage parameter is set to 0.1 due to performance issues. Besides the stump (1), 2 additional values are tested for the interaction depth. The best values for the 4 tuning parameters are as following:
+
+- Interaction Depth:                    `r hr.gbm[["bestTune"]][["interaction.depth"]]`
+- Number of Trees:                      `r hr.gbm[["bestTune"]][["n.trees"]]`
+- Shrinkage (Learning Rate):            `r hr.gbm[["bestTune"]][["shrinkage"]]`
+- The Minimum Observations in a Node:   `r hr.gbm[["bestTune"]][["n.minobsinnode"]]`
+
+## Part E
+
+Provide the Confusion Matrix along with sensitivity, specificity, precision and recall on the
+test set obtained by the best boosting tree.
+
+```{r q1e}
+# Checking the confusion matrix
+
+pred.hr.gbm <- predict(hr.gbm,
+                       newdata = hrtest)
+
+confusionMatrix(pred.hr.gbm,
+                hrtest$left,
+                mode        = "everything",
+                positive    = "1")
+
+```
+
+# Question 2
+
+Consider the data set given in the file “ToyotaCorolla.csv”. The output attribute to be
+predicted is the Price attribute. Use a seed value of 425 wherever you need a seed.
+
+```{r q2}
+# Importing the data
+
+tc <- fread("ToyotaCorolla.csv")
+
+```
+
+
+## Part A
+
+Partition the data set into training and test sets where 80% of goes into the training set and
+20% goes into the test set.
+
+```{r q2a}
+set.seed(seed)
+
+split2  <- sample.split(tc$Price,
+                        SplitRatio = 0.80)
+
+tctrain <- subset(tc, split2 == TRUE)
+tctest  <- subset(tc, split2 == FALSE)
+
+```
+
+## Part B
+
+Determine the best random forest (based on the random forest package) by using 10-fold
+cross validation five times with the caret package on the training set by playing with the "mtry"
+and "ntree" parameters. What are the best values of these two parameters and what is the out-of-bag accuracy? Comment on which input attributes are important in making predictions.
+
+```{r q2b1}
+# Creating an empty data frame for the reporting after the trials
+
+report2b            <- data.frame(matrix(ncol = 3, nrow = 0))
+
+# Creating the tune grid with different mtry values:
+# from the square root of total predictors to the total number of predictors
+
+tc.rf.tuneGrid      <- expand.grid(mtry = (sqrt(ncol(tctrain)-1) : (ncol(tctrain)-1)))
+
+# Generating trials for different number of trees
+
+for(ntree in seq(from = 200, to = 800, by = 100)){
+    
+    set.seed(seed)
+    
+    try             <- train(Price~.,
+                             data       = tctrain,
+                             method     = "rf",
+                             trControl  = trainControl(method   = 'repeatedcv',
+                                                       number   = 10,
+                                                       repeats  = 5),
+                             ntree      = ntree,
+                             tuneGrid   = tc.rf.tuneGrid)
+    
+    temp            <- data.frame(ntree,
+                                  try[["bestTune"]][["mtry"]],
+                                  min(try[["results"]][["RMSE"]]))
+    
+    report2b        <- rbind(report2b, temp)
+    
+}
+
+# Displaying the report
+
+colnames(report2b)  <- c("ntree", "Best mtry", "RMSE")
+
+report2b
+
+```
+
+As the above table suggests, the best values for *"mtry"* and *"ntree"* are *`r report2b[which.min(report2b$RMSE), "Best mtry"]`* and *`r report2b[which.min(report2b$RMSE), "ntree"]`*, respectively, which yield an RMSE of *`r report2b[which.min(report2b$RMSE), "RMSE"]`*.
+
+```{r q2b2}
+# Generating the best model
+
+set.seed(seed)
+
+tc.rf.best      <- train(Price~.,
+                         data       = tctrain,
+                         method     = "rf",
+                         trControl  = trainControl(method   = 'repeatedcv',
+                                                   number   = 10,
+                                                   repeats  = 5),
+                         # Choosing the best ntree value in terms of accuracy
+                         ntree      = report2b[which.min(report2b$rmse), "ntree"],
+                         tuneGrid   = tc.rf.tuneGrid)
+
+# Checking the best model, and its out-of-bag error
+# (denoted as "Mean of squared residuals" in the output)
+
+tc.rf.best[["finalModel"]]
+
+```
+
+
+```{r}
+# Checking the importance of the predictors
+
+tc.rf.var.imp <- varImp(tc.rf.best)
+plot(tc.rf.var.imp)
+
+```
+
+As can be seen in the above plot, age is the most important predictor by far. KM, Weight, HP and CC have also considerable effect on prices.
+
+## Part C
+
+Make predictions in the test set and report the root mean square error rate and mean absolute
+error using the functions in the Metrics package.
+
+```{r q2c}
+# Making predictions in the test set
+
+pred.tc.rf <- predict(tc.rf.best,
+                      newdata = tctest)
+
+# Reporting MAE
+
+mae(actual      = tctest$Price,
+    predicted   = pred.tc.rf)
+
+```
+
+## Part D
+
+Repeat part b with the gradient boosting using the "caret" and "gbm" packages by playing with
+the "interaction.depth", "n.trees", "shrinkage", and "n.minobsinnode" parameters. What are the best
+values of these four parameters?
+
+```{r q2d}
+tc.gbm.tuneGrid <- expand.grid(interaction.depth = c(1, 2, 3),
+                               n.trees           = c(200, 300, 400),
+                               shrinkage         = (1:10)*0.01,
+                               n.minobsinnode    = c(10, 15))
+
+set.seed(seed)
+
+tc.gbm <- train(Price~.,
+                data        = tctrain,
+                method      = "gbm",
+                verbose     = FALSE,
+                trControl   = trainControl(method     = 'repeatedcv',
+                                           number     = 10,
+                                           repeats    = 5),
+                tuneGrid    = tc.gbm.tuneGrid)
+
+```
+
+Since the training set is small this time, the shrinkage parameter is set to 0.01, which makes the model learn slower, and consequently better. Besides the stump (1), 2 additional values are tested for the interaction depth. The best values for the 4 tuning parameters are as following:
+
+- Interaction Depth:                    `r tc.gbm[["bestTune"]][["interaction.depth"]]`
+- Number of Trees:                      `r tc.gbm[["bestTune"]][["n.trees"]]`
+- Shrinkage (Learning Rate):            `r tc.gbm[["bestTune"]][["shrinkage"]]`
+- The Minimum Observations in a Node:   `r tc.gbm[["bestTune"]][["n.minobsinnode"]]`
+
+## Part E
+
+Make predictions in the test set and report the root mean square error rate and mean absolute
+error using the functions in the "Metrics" package.
+
+```{r q2e}
+# Making predictions in the test set
+
+pred.tc.gbm <- predict(tc.gbm,
+                       newdata = tctest)
+
+# Reporting MAE
+
+mae(actual      = tctest$Price,
+    predicted   = pred.tc.gbm)
+
+```
+
+# Resources
+
+- [Tune Machine Learning Algorithms in R (random forest case study)](https://machinelearningmastery.com/tune-machine-learning-algorithms-in-r/)
+
+- [Hands on Machine Learning with R - Chapter 12: Gradient Boosting](https://bradleyboehmke.github.io/HOML/gbm.html#xgboost)
+
+- [GBM (Boosted Models) Tuning Parameters](https://www.listendata.com/2015/07/gbm-boosted-models-tuning-parameters.html)
+
+- [Setting values for ntree and mtry for random forest regression model](https://stackoverflow.com/questions/13956435/setting-values-for-ntree-and-mtry-for-random-forest-regression-model)
